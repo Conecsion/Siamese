@@ -1,0 +1,31 @@
+[project]
+name = "siamese-cryoem"
+version = "0.1.0"
+description = "Siamese contrastive encoder for cryo-EM particle retrieval"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.5",
+    "torchvision",
+    "timm>=0.9",
+    "numpy",
+    "healpy",
+    "mrcfile",
+    "pyyaml",
+    "tqdm",
+    "matplotlib",
+    "faiss-cpu",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["siamese*"]
