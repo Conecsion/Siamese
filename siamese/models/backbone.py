@@ -43,10 +43,7 @@ def build_backbone(
         from timm.models.convnext import ConvNeXt
 
         # 映射名称到 timm 的 convnext 变体
-        if "tiny" in name:
-            depths = (3, 3, 9, 3)
-            dims = (96, 192, 384, 768)
-        elif "small" in name:
+        if "small" in name:
             depths = (3, 3, 27, 3)
             dims = (96, 192, 384, 768)
         elif "base" in name:
