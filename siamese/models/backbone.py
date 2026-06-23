@@ -22,6 +22,7 @@ def build_backbone(
     depths: Tuple[int, ...] = (3, 3, 9, 3),
     dims: Tuple[int, ...] = (96, 192, 384, 768),
     drop_path_rate: float = 0.0,
+    stem_stride: int = 4,
 ) -> nn.Module:
     """
     创建 backbone 特征提取器。
@@ -33,6 +34,8 @@ def build_backbone(
         depths: ConvNeXt 各 stage 的 block 数量
         dims: ConvNeXt 各 stage 的通道数
         drop_path_rate: stochastic depth rate
+        stem_stride: stem 卷积 stride, 默认 4 (ConvNeXt 标准)。
+                     设为 2 可减少下采样, 为小图像保留更多空间信息。
 
     返回:
         backbone: nn.Module, 输出特征图 (不含 head 和 GAP)
@@ -58,8 +61,13 @@ def build_backbone(
             head_hidden_size=None,  # 不使用分类头
             num_classes=0,          # 返回特征
         )
-        # 移除分类头: ConvNeXt 的 head 是 nn.Identity 当 num_classes=0
-        # 但我们需要保留 stem + stages，去掉最后的 head 和 global_pool
+
+        # 如果 stem_stride != 4, 修改 stem 的 stride
+        if stem_stride != 4:
+            # ConvNeXt stem: Sequential(Conv2d(4x4, stride=4), LayerNorm)
+            # 替换 stride
+            backbone.stem[0].stride = (stem_stride, stem_stride)
+
         return backbone
 
     elif name in ("vit_small", "swin_t"):

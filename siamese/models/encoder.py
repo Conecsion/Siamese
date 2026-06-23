@@ -3,16 +3,56 @@ Siamese 双分支编码器。
 
 实空间分支 (1 通道) + 频域分支 (2 通道: 实部+虚部)
 → 各自经过 backbone 提取特征 → GAP → FusionHead → L2 embedding
+
+优化:
+    - stem_stride 可配置, 默认 4 (ConvNeXt 标准), 小图像建议 2
+    - share_backbone 可配置, 默认 False (独立权重)
+    - 支持 cross-attention 或 concat 融合
 """
 
 from typing import Literal, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from siamese.models.backbone import build_backbone
 from siamese.models.fusion import FusionHead
 from siamese.utils.fft import image_to_freq_channels, normalize_image
+
+
+class CrossAttentionFusion(nn.Module):
+    """
+    交叉注意力融合层 (可选, 用于较大数据集)。
+
+    实空间特征和频域特征通过 cross-attention 互相增强后融合。
+    TODO: 在更大数据集上测试效果
+    """
+
+    def __init__(self, dim: int, num_heads: int = 4, hidden_dim: int = 256, output_dim: int = 128):
+        super().__init__()
+        self.cross_attn_real = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        self.cross_attn_freq = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        self.norm_real = nn.LayerNorm(dim)
+        self.norm_freq = nn.LayerNorm(dim)
+        self.projector = nn.Sequential(
+            nn.Linear(dim * 2, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, output_dim),
+        )
+
+    def forward(self, real_feat: torch.Tensor, freq_feat: torch.Tensor) -> torch.Tensor:
+        r = real_feat.unsqueeze(1)
+        f = freq_feat.unsqueeze(1)
+        r_enhanced, _ = self.cross_attn_real(r, f, f)
+        f_enhanced, _ = self.cross_attn_freq(f, r, r)
+        r_enhanced = self.norm_real(r_enhanced + r)
+        f_enhanced = self.norm_freq(f_enhanced + f)
+        combined = torch.cat([r_enhanced.squeeze(1), f_enhanced.squeeze(1)], dim=-1)
+        embedding = self.projector(combined)
+        embedding = F.normalize(embedding, p=2, dim=-1)
+        return embedding
 
 
 class SiameseEncoder(nn.Module):
@@ -41,6 +81,9 @@ class SiameseEncoder(nn.Module):
         hidden_dim: int = 256,
         convnext_depths: Tuple[int, ...] = (3, 3, 9, 3),
         convnext_dims: Tuple[int, ...] = (96, 192, 384, 768),
+        stem_stride: int = 4,        # stem 卷积 stride, 默认 4, 小图像可设 2
+        share_backbone: bool = False,  # 是否共享 backbone 权重
+        use_cross_attention: bool = False,  # TODO: 是否用 cross-attention 融合
     ):
         """
         参数:
@@ -52,28 +95,39 @@ class SiameseEncoder(nn.Module):
             hidden_dim: 融合头隐藏层维度
             convnext_depths: ConvNeXt 各 stage 的 block 数
             convnext_dims: ConvNeXt 各 stage 的通道数
+            stem_stride: stem 卷积 stride, 减小可保留更多空间信息
+            share_backbone: 是否共享 backbone 权重 (减少参数量)
+            use_cross_attention: 是否使用 cross-attention 融合
         """
         super().__init__()
         self.image_size = image_size
         self.embedding_dim = embedding_dim
+        self.share_backbone = share_backbone
 
-        # 实空间分支
+        # 实空间分支 backbone
         self.backbone_real = build_backbone(
             name=backbone_name,
             in_channels=real_in_channels,
             image_size=image_size,
             depths=convnext_depths,
             dims=convnext_dims,
+            stem_stride=stem_stride,
         )
 
-        # 频域分支（权重独立）
-        self.backbone_freq = build_backbone(
-            name=backbone_name,
-            in_channels=freq_in_channels,
-            image_size=image_size,
-            depths=convnext_depths,
-            dims=convnext_dims,
-        )
+        if share_backbone:
+            # 频域分支共享 backbone, 仅用轻量 stem adapter 处理 2->1 通道
+            self.backbone_freq = self.backbone_real
+            self.freq_adapter = nn.Conv2d(freq_in_channels, real_in_channels, kernel_size=1)
+        else:
+            self.backbone_freq = build_backbone(
+                name=backbone_name,
+                in_channels=freq_in_channels,
+                image_size=image_size,
+                depths=convnext_depths,
+                dims=convnext_dims,
+                stem_stride=stem_stride,
+            )
+            self.freq_adapter = None
 
         # 特征维度 (ConvNeXt 最后一个 stage 的输出通道数)
         feature_dim = convnext_dims[-1]  # 默认 768
@@ -82,12 +136,20 @@ class SiameseEncoder(nn.Module):
         self.gap = nn.AdaptiveAvgPool2d((1, 1))
 
         # 融合头
-        self.fusion_head = FusionHead(
-            real_dim=feature_dim,
-            freq_dim=feature_dim,
-            hidden_dim=hidden_dim,
-            output_dim=embedding_dim,
-        )
+        if use_cross_attention:
+            self.fusion_head = CrossAttentionFusion(
+                dim=feature_dim,
+                num_heads=4,
+                hidden_dim=hidden_dim,
+                output_dim=embedding_dim,
+            )
+        else:
+            self.fusion_head = FusionHead(
+                real_dim=feature_dim,
+                freq_dim=feature_dim,
+                hidden_dim=hidden_dim,
+                output_dim=embedding_dim,
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -106,8 +168,13 @@ class SiameseEncoder(nn.Module):
         real_feat = real_feat.flatten(1)  # [N, C]
 
         # 3. 频域分支
-        # 对归一化后的图像做 FFT
-        x_freq = image_to_freq_channels(x_norm.squeeze(1))  # [N, D, D] -> [N, 2, D, D]
+        # FFT: [N, 1, D, D] -> squeeze -> [N, D, D] -> FFT -> [N, 2, D, D]
+        x_freq = image_to_freq_channels(x_norm.squeeze(1))  # [N, 2, D, D]
+
+        if self.freq_adapter is not None:
+            # 共享 backbone: 2 通道 -> 1 通道 adapter
+            x_freq = self.freq_adapter(x_freq)  # [N, 1, D, D]
+
         freq_feat = self.backbone_freq.forward_features(x_freq)  # [N, C, H, W]
         freq_feat = self.gap(freq_feat)  # [N, C, 1, 1]
         freq_feat = freq_feat.flatten(1)  # [N, C]
