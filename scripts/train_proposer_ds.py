@@ -280,7 +280,14 @@ def main() -> None:
         stem_stride=stem_stride,
         share_backbone=share_backbone)
     encoder = TwoTowerEncoder(proj_encoder=proj_encoder, mic_encoder=mic_encoder)
-    proposer = PoseProposer(encoder=encoder, embedding_dim=emb_dim)
+
+    # PoseProposer 配置
+    temperature = cfg.get("temperature", 0.07)
+    proposer = PoseProposer(
+        encoder=encoder,
+        temperature=temperature,
+        use_residual=True,
+        use_shift=True)
 
     if is_main_process():
         n_params = sum(p.numel() for p in proposer.parameters())
