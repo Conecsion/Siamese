@@ -101,7 +101,7 @@ class PoseProposer(nn.Module):
 
     def __init__(
         self,
-        encoder: nn.Module,           # TwoTowerEncoder (有 encode_mic/encode_proj)
+        encoder: "TwoTowerEncoder",   # 精确类型，让 Pyright 知道有 encode_mic/encode_proj
         temperature: float = 0.07,    # 先验 softmax 温度
         use_residual: bool = True,
         use_shift: bool = True,

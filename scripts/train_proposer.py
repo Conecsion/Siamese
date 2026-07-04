@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import yaml
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 from torch.utils.tensorboard import SummaryWriter
 
 from siamese.data.cryosparc import CryoSparcParticleDataset
@@ -162,11 +162,9 @@ def main() -> None:
     device = torch.device(cfg.get("device", "cuda"))
 
     # --- 数据 ---
-    # 支持多数据集 (datasets 列表) 或单数据集 (cs_path/reference_path)
+    train_dss: list[CryoSparcParticleDataset] = []   # 顶层声明，避免 possibly-unbound
+    val_dss: list[CryoSparcParticleDataset] = []
     if "datasets" in cfg:
-        # 多数据集: 每个独立加载后 concat
-        from torch.utils.data import ConcatDataset
-        train_dss, val_dss = [], []
         for ds_cfg in cfg["datasets"]:
             common = dict(
                 cs_path=ds_cfg["cs_path"],
@@ -239,7 +237,7 @@ def main() -> None:
     opt = torch.optim.AdamW(proposer.parameters(), lr=cfg.get("lr", 1e-4),
                             weight_decay=cfg.get("weight_decay", 1e-4))
     use_amp = cfg.get("mixed_precision", False)
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)  # type: ignore[attr-defined]
 
     ckpt_dir = Path(cfg.get("checkpoint_dir", "checkpoints_proposer"))
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -266,13 +264,25 @@ def main() -> None:
             axisang = axisang.to(device)
             R_gt = axis_angle_to_matrix(axisang)
             opt.zero_grad()
-            with torch.amp.autocast("cuda", enabled=use_amp):
-                z_mic = torch.nn.functional.normalize(proposer.encoder.encode_mic(particle), dim=1)
-                z_proj = proposer.encoder.encode_proj(proj)
-                loss_ce = gallery_ce(z_mic, gal_emb, R_gt, R_gallery)   # 训练目标=检索目标
-                loss_nce = criterion(z_mic, z_proj, axisang)            # 维持 proj 塔+联合空间
+            with torch.amp.autocast("cuda", enabled=use_amp):  # type: ignore[attr-defined]
+                z_mic = torch.nn.functional.normalize(
+                    proposer.encoder.encode_mic(particle), dim=1)
+                z_proj = torch.nn.functional.normalize(   # 显式归一化，防止 AMP 下精度漂移
+                    proposer.encoder.encode_proj(proj), dim=1)
+                loss_ce = gallery_ce(z_mic, gal_emb, R_gt, R_gallery)
+                loss_nce = criterion(z_mic, z_proj, axisang)
                 loss = w_ce * loss_ce + w_nce * loss_nce
+
+            # NaN 检测：跳过坏 batch，避免污染权重
+            if not torch.isfinite(loss):
+                print(f"  ⚠ NaN/Inf loss at epoch {epoch+1} batch {batch_idx}, skipping", flush=True)
+                opt.zero_grad()
+                continue
+
             scaler.scale(loss).backward()
+            # 梯度裁剪（unscale 后再 clip，与 AMP 兼容）
+            scaler.unscale_(opt)
+            torch.nn.utils.clip_grad_norm_(proposer.parameters(), max_norm=1.0)
             scaler.step(opt); scaler.update()
             tot_loss += loss.item()
             tot_ce += loss_ce.item()
