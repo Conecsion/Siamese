@@ -13,7 +13,7 @@ datasets:
     project_dir: "/Data/cryoPPP/10002/CS-10002"
   - name: "J31_4.16A"
     cs_path: "data/cs_processed/ribosome_homerefine/J31_particles/J31_particles_exported.cs"
-    reference_path: "data/cs_processed/ribosome_homerefine/J31_volume/J31/J31_004_volume_map.mrc"
+    reference_path: "data/cs_processed/ribosome_homerefine/J31_volume/J31/J31_volume_unified.mrc"
     project_dir: "data/cs_processed/ribosome_homerefine/J31_particles"
 
 # --- 数据处理 ---
