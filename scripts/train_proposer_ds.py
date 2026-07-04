@@ -164,6 +164,9 @@ def build_gallery(
             proj_batch = project_fourier_slice_from_axis_angle(
                 ref_vol.cpu(), aa_batch.cpu()).to(device)
 
+            # 添加通道维度 [B, D, D] -> [B, 1, D, D]
+            proj_batch = proj_batch.unsqueeze(1)
+
             # 转换为模型的数据类型（FP16 或 FP32）
             # DeepSpeed 会自动将模型转换为 FP16，输入也需要匹配
             proj_batch = proj_batch.to(dtype=next(proposer.parameters()).dtype)
