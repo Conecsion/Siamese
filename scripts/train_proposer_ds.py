@@ -257,7 +257,7 @@ def main() -> None:
     # --- Gallery ---
     nside = cfg.get("gallery_nside", 8)
     inplane = cfg.get("gallery_inplane", 12)
-    gallery_aa = healpix_axis_angles(nside, inplane_step_deg=360/inplane)
+    gallery_aa = healpix_axis_angles(nside, n_inplane=inplane)
     if is_main_process():
         print(f"gallery: {len(gallery_aa)} 朝向")
 
