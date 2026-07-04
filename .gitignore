@@ -3,8 +3,8 @@ checkpoints*/
 *.log
 /tmp/
 
-# Data files (will be packed separately)
-data/
+# Data files (will be packed separately) - only exclude top-level data/
+/data/
 *.mrc
 *.mrcs
 *.cs
