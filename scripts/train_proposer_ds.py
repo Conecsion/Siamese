@@ -264,11 +264,22 @@ def main() -> None:
     # --- 模型 ---
     backbone_name = cfg.get("backbone", "convnext_tiny")
     emb_dim = cfg.get("embedding_dim", 128)
-    encoder = TwoTowerEncoder(
+    stem_stride = cfg.get("stem_stride", 4)
+    share_backbone = cfg.get("share_backbone", False)
+
+    # 创建双塔编码器
+    from siamese.models.encoder import SiameseEncoder
+    proj_encoder = SiameseEncoder(
         backbone_name=backbone_name,
         embedding_dim=emb_dim,
-        stem_stride=cfg.get("stem_stride", 4),
-        share_backbone=cfg.get("share_backbone", False))
+        stem_stride=stem_stride,
+        share_backbone=share_backbone)
+    mic_encoder = SiameseEncoder(
+        backbone_name=backbone_name,
+        embedding_dim=emb_dim,
+        stem_stride=stem_stride,
+        share_backbone=share_backbone)
+    encoder = TwoTowerEncoder(proj_encoder=proj_encoder, mic_encoder=mic_encoder)
     proposer = PoseProposer(encoder=encoder, embedding_dim=emb_dim)
 
     if is_main_process():
