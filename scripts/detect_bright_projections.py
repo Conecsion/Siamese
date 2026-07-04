@@ -104,10 +104,11 @@ def detect_bright_projections(
     results = []
     bright_samples = []
 
-    # 计算全局阈值（基于所有投影的统计）
-    all_values = projections.flatten()
-    global_threshold = torch.quantile(all_values, threshold_percentile / 100.0).item()
-    print(f"  全局亮度阈值 (P{threshold_percentile}): {global_threshold:.4f}")
+    # 计算全局阈值（采样以避免内存问题）
+    sample_size = min(100000, all_values.numel())
+    sampled_values = all_values[torch.randperm(all_values.numel())[:sample_size]]
+    global_threshold = torch.quantile(sampled_values, threshold_percentile / 100.0).item()
+    print(f"  全局亮度阈值 (P{threshold_percentile}, 采样): {global_threshold:.4f}")
     print()
 
     for i, proj in enumerate(tqdm(projections)):
