@@ -164,9 +164,14 @@ def build_gallery(
             proj_batch = project_fourier_slice_from_axis_angle(
                 ref_vol.cpu(), aa_batch.cpu()).to(device)
 
+            # 转换为模型的数据类型（FP16 或 FP32）
+            # DeepSpeed 会自动将模型转换为 FP16，输入也需要匹配
+            proj_batch = proj_batch.to(dtype=next(proposer.parameters()).dtype)
+
             # 编码
-            z_proj = torch.nn.functional.normalize(
-                proposer.encoder.encode_proj(proj_batch), dim=1)
+            with torch.no_grad():  # Gallery 构建不需要梯度
+                z_proj = torch.nn.functional.normalize(
+                    proposer.encoder.encode_proj(proj_batch), dim=1)
             embs.append(z_proj.cpu())
 
         gallery_emb = torch.cat(embs, 0).to(device)
