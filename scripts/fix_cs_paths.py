@@ -40,22 +40,34 @@ def fix_cs_paths(cs_path: str, prefix: str, backup: bool = True):
     original_paths = data['blob/path'].copy()
     fixed_count = 0
 
+    # 首先计算所有新路径并找到最大长度
+    new_paths = []
+    for path in original_paths:
+        path_str = path.decode() if isinstance(path, bytes) else str(path)
+        # 移除可能的前缀字符（如 '>'）
+        path_str = path_str.lstrip('>')
+        # 添加正确的前缀
+        new_path = prefix + path_str
+        new_paths.append(new_path)
+        fixed_count += 1
+
+    # 计算需要的最大长度
+    max_len = max(len(p) for p in new_paths)
+    print(f"  最大路径长度: {max_len}")
+
+    # 创建新的 dtype，为 blob/path 字段分配足够空间
+    new_dtype = []
+    for name in data.dtype.names:
+        if name == 'blob/path':
+            new_dtype.append((name, f'S{max_len}'))
+        else:
+            new_dtype.append((name, data.dtype.fields[name][0]))
+
     # 创建新的结构化数组
-    new_data = np.empty(len(data), dtype=data.dtype)
+    new_data = np.empty(len(data), dtype=new_dtype)
     for field in data.dtype.names:
         if field == 'blob/path':
-            # 修复路径
-            new_paths = []
-            for path in original_paths:
-                path_str = path.decode() if isinstance(path, bytes) else str(path)
-                # 移除可能的前缀字符（如 '>'）
-                path_str = path_str.lstrip('>')
-                # 添加正确的前缀
-                new_path = prefix + path_str
-                new_paths.append(new_path)
-                fixed_count += 1
             # 转换为字节数组
-            max_len = max(len(p) for p in new_paths)
             new_data['blob/path'] = np.array([p.encode() for p in new_paths], dtype=f'S{max_len}')
         else:
             new_data[field] = data[field]
