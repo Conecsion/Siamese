@@ -87,7 +87,7 @@ def check_training_data_quality(config_path: str, num_samples: int = 100):
         if i >= num_samples:
             break
 
-        particle, proj, axisang, idx = batch
+        particle, proj, axisang, shift, ps_work = batch
 
         # 去除 batch 维度
         particle = particle.squeeze(0)  # [1, D, D]
@@ -105,7 +105,6 @@ def check_training_data_quality(config_path: str, num_samples: int = 100):
         else:
             stats['invalid_particle'].append({
                 'index': i,
-                'idx': idx.item(),
                 'issues': particle_result['issues'],
                 'stats': particle_result['stats']
             })
@@ -128,7 +127,6 @@ def check_training_data_quality(config_path: str, num_samples: int = 100):
         else:
             stats['invalid_proj'].append({
                 'index': i,
-                'idx': idx.item(),
                 'axisang': axisang.tolist(),
                 'issues': proj_result['issues'],
                 'stats': proj_result['stats']
