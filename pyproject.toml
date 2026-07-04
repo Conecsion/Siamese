@@ -4,8 +4,8 @@ version = "0.1.0"
 description = "Siamese contrastive encoder for cryo-EM particle retrieval"
 requires-python = ">=3.11"
 dependencies = [
-    "torch>=2.5",
-    "torchvision",
+    "torch>=2.0,<2.5",  # Compatible with CUDA 12.4
+    "torchvision>=0.15,<0.20",
     "timm>=0.9",
     "numpy",
     "healpy",
