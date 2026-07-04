@@ -61,11 +61,19 @@ def fix_cs_paths(cs_path: str, prefix: str, backup: bool = True):
             new_data[field] = data[field]
 
     # 保存修复后的文件
-    np.save(cs_path, new_data)
+    # 注意: .cs 文件就是 .npy 格式，但需要确保保存时不添加 .npy 扩展名
+    output_path = str(cs_path).replace('.cs', '_fixed.cs')
+    np.save(output_path, new_data)
+
+    # 删除旧文件并重命名
+    cs_path.unlink()
+    Path(output_path + '.npy').rename(cs_path)
 
     print(f"✓ 修复完成: {cs_path}")
     print(f"  修复路径数: {fixed_count}")
-    print(f"  示例: {original_paths[0].decode()} → {new_paths[0]}")
+    if len(original_paths) > 0:
+        old_path = original_paths[0].decode() if isinstance(original_paths[0], bytes) else str(original_paths[0])
+        print(f"  示例: {old_path} → {new_paths[0]}")
 
 
 def main():
