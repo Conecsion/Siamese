@@ -6,15 +6,15 @@ datasets:
   - name: "J8_3.00A"
     cs_path: "data/cs_processed/ribosome_J8/J8_particles/J8_particles_exported.cs"
     reference_path: "data/cs_processed/ribosome_J8/J8_volume/J8_000_volume_map.mrc"
-    project_dir: "/Data/cryoPPP/10406/CS-10406"
+    project_dir: "data/particles/ribosome_J8"
   - name: "J20_3.68A"
     cs_path: "data/cs_processed/ribosome_J20/J20_particles/J20_particles_exported.cs"
     reference_path: "data/cs_processed/ribosome_J20/J20_volume/J20_000_volume_map.mrc"
-    project_dir: "/Data/cryoPPP/10002/CS-10002"
+    project_dir: "data/particles/ribosome_J20"
   - name: "J31_4.16A"
     cs_path: "data/cs_processed/ribosome_homerefine/J31_particles/J31_particles_exported.cs"
     reference_path: "data/cs_processed/ribosome_homerefine/J31_volume/J31/J31_volume_unified.mrc"
-    project_dir: "data/cs_processed/ribosome_homerefine/J31_particles"
+    project_dir: "data/particles/ribosome_homerefine"
 
 # --- 数据处理 ---
 working_ps: 2.0          # 工作像素大小 (Å); 三套数据统一重采样
