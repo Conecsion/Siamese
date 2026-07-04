@@ -151,11 +151,11 @@ def build_gallery(
 
         for i in range(0, G, batch_size):
             aa_batch = gallery_aa[i:i+batch_size].to(device)
-            R_batch = axis_angle_to_matrix(aa_batch)
 
             # 投影
-            from siamese.data.projection import project_volume
-            proj_batch = project_volume(ref_vol, R_batch, device=device)
+            from siamese.data.projection import project_fourier_slice_from_axis_angle
+            proj_batch = project_fourier_slice_from_axis_angle(
+                ref_vol, aa_batch, device=device)
 
             # 编码
             z_proj = torch.nn.functional.normalize(
@@ -336,7 +336,7 @@ def main() -> None:
 
         # 重建 gallery (每个 epoch 开始时)
         gal_emb = build_gallery(model_engine, gallery_aa, ref_vol, device)
-        model_engine.module.set_gallery(gal_emb)
+        model_engine.module.set_gallery(gal_emb, gallery_aa)
 
         tot_loss, tot_ce, tot_nce, nb = 0.0, 0.0, 0.0, 0
         import time; t0 = time.time()
