@@ -152,10 +152,10 @@ def build_gallery(
         for i in range(0, G, batch_size):
             aa_batch = gallery_aa[i:i+batch_size].to(device)
 
-            # 投影
+            # 投影 (在 CPU 上生成，然后移到 GPU)
             from siamese.data.projection import project_fourier_slice_from_axis_angle
             proj_batch = project_fourier_slice_from_axis_angle(
-                ref_vol, aa_batch, device=device)
+                ref_vol.cpu(), aa_batch.cpu()).to(device)
 
             # 编码
             z_proj = torch.nn.functional.normalize(
