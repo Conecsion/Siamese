@@ -1,0 +1,50 @@
+# 远程训练配置（修改后的路径）
+# 与 proposer_ribosome_multi.yaml 相同，但 project_dir 指向打包后的本地路径
+
+# --- 数据集 ---
+datasets:
+  - name: "J8_3.00A"
+    cs_path: "data/cs_processed/ribosome_J8/J8_particles/J8_particles_exported.cs"
+    reference_path: "data/cs_processed/ribosome_J8/J8_volume/J8_000_volume_map.mrc"
+    project_dir: "data/particles/J8"  # 远程：解压后的颗粒路径
+  - name: "J20_3.68A"
+    cs_path: "data/cs_processed/ribosome_J20/J20_particles/J20_particles_exported.cs"
+    reference_path: "data/cs_processed/ribosome_J20/J20_volume/J20_000_volume_map.mrc"
+    project_dir: "data/particles/J20"  # 远程：解压后的颗粒路径
+  - name: "J31_4.16A"
+    cs_path: "data/cs_processed/ribosome_homerefine/J31_particles/J31_particles_exported.cs"
+    reference_path: "data/cs_processed/ribosome_homerefine/J31_volume/J31/J31_004_volume_map.mrc"
+    project_dir: "data/particles/J31"  # 远程：解压后的颗粒路径
+
+# --- 数据处理 ---
+working_ps: 2.0          # 工作像素大小 (Å); 三套数据统一重采样
+bucket: 256              # 固定桶尺寸
+apply_ctf_to_proj: false # 训练投影不加 CTF (快), gallery 也不加
+
+# --- 模型 ---
+backbone: "convnext_tiny"
+embedding_dim: 128
+temperature: 0.07        # 降低以提高数值稳定性（避免 NaN）
+
+# --- 训练 ---
+batch_size: 16
+num_epochs: 80           # 数据量 7× → 训练更久
+lr: 0.0002               # 提升 (之前 1e-4 偏保守)
+weight_decay: 0.0002     # 加强正则 (打过拟合)
+eval_interval: 5
+mixed_precision: true
+
+# 损失: gallery 分类 (训练目标=检索目标) + InfoNCE (维持联合空间)
+w_gallery_ce: 1.0
+w_infonce: 0.5
+label_sigma_deg: 7.0     # 软标签高斯宽度
+
+# --- gallery (评估用) ---
+gallery_nside: 8         # 9216 朝向
+gallery_inplane: 12
+grid_tol_deg: 15.0
+
+# --- checkpoint ---
+checkpoint_dir: "checkpoints_proposer_multi"
+seed: 42
+device: "cuda"
