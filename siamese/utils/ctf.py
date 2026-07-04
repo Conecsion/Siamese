@@ -10,8 +10,9 @@ CTF 调制是 cryo-EM 图像形成模型的核心部分。在频域中，CTF 描
 import math
 from typing import Union
 
+import numpy as np
 import torch
-from torch.fft import fftshift, fftfreq
+from torch.fft import fftfreq
 
 
 def compute_ctf(
@@ -44,15 +45,18 @@ def compute_ctf(
     if device is None:
         device = torch.device("cpu")
 
-    # 电子波长 (Å), 非相对论近似
-    # λ = h / sqrt(2 * m * e * V)
-    # 简化: λ ≈ 12.2643 / sqrt(V + 0.97845e-6 * V^2)  (包含相对论修正)
-    voltage_rel = voltage * (1.0 + voltage * 0.97845e-6)  # 相对论修正
-    wavelength = 12.2643 / math.sqrt(voltage_rel)  # Å
+    # 电子波长 (Å), 相对论修正
+    # λ = 12.2643247 / sqrt(V * (1 + 0.978466e-6 * V)),  V 单位为伏特
+    # 注意: voltage 传入单位是 kV, 必须换算成 V (×1e3), 否则 λ 偏大约 36×。
+    voltage_V = voltage * 1e3
+    voltage_rel = voltage_V * (1.0 + voltage_V * 0.978466e-6)
+    wavelength = 12.2643247 / math.sqrt(voltage_rel)  # Å
 
     # 处理 defocus: 可以是标量或 batch
     if isinstance(defocus, float):
         defocus = torch.tensor([defocus], device=device)
+    elif isinstance(defocus, np.floating):
+        defocus = torch.tensor([float(defocus)], device=device)
     elif not isinstance(defocus, torch.Tensor):
         defocus = torch.as_tensor(defocus, device=device)
     else:

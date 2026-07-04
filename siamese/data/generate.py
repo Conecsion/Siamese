@@ -1,44 +1,38 @@
 """
-模拟数据生成。
+模拟训练数据生成。
 
-从 3D volume 用 HEALPix 采样生成 proj，再添加 CTF、shift、噪声生成 mic。
-一次生成所有数据并保存到硬盘，避免训练时重复计算。
+主要输出 (projs.pt / mics.pt / axisang.pt / pairs.pt / metadata.yaml):
+  projs   [N, D, D] — 无 CTF / 无噪声的干净投影 (proj 分支用)
+  mics    [M, D, D] — 含 CTF + 随机位移 + 高斯噪声的模拟 mic (particle 分支用)
+  axisang [N, 3]    — projs 对应的轴角向量 (弧度, pyem / cryoSPARC 约定)
+  pairs   [M, 2]    — (proj_idx, mic_idx) 配对索引
 
-输出文件:
-  - projs.pt: [N, D, D] clean projections
-  - mics.pt:  [M, D, D] noisy micrographs (M = N * num_mics_per_proj)
-  - axisang.pt: [N, 3] 每个 proj 对应的轴角
-  - pairs.pt: [M, 2] 每个 mic 对应的 (proj_idx, mic_idx) 配对索引
-  - metadata.yaml: 生成参数记录
+可选额外导出 (export_format="cryosparc" / "relion"):
+  由 siamese.data.export 完成, 同时写 .mrcs + .cs / .star。
 """
-
 from __future__ import annotations
 
-import math
-import sys
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Literal, Optional, Tuple
 
+import mrcfile
 import numpy as np
 import torch
 import yaml
-from torch.fft import fftshift, fft2, ifft2, fftfreq
+from torch import Tensor
 from tqdm import tqdm
 
-from siamese.utils.ctf import compute_ctf
-
-# 将项目根目录加入 sys.path，以便导入根目录下的 project.py
-_project_root = Path(__file__).resolve().parent.parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
-
-from project import healpix_project
+from siamese.data.orientations import healpix_axis_angles, uniform_so3_axis_angles
+from siamese.data.projection import project_fourier_slice_from_axis_angle
 
 
 def generate_simulated_data(
     map_path: str,
     nside: int,
     output_dir: str,
+    *,
+    orientation_mode: Literal["healpix", "uniform"] = "healpix",
+    n_inplane: int = 1,
     image_size: int = 128,
     pixel_size: float = 1.0,
     num_mics_per_proj: int = 2,
@@ -47,198 +41,136 @@ def generate_simulated_data(
     max_shift_pixels: float = 5.0,
     cs: float = 2.7,
     voltage: float = 300.0,
-    amplitude_contrast: float = 0.1,
+    amplitude_contrast: float = 0.07,
     device: str = "cuda",
-    chunk_size: int = 256,
+    chunk_size: Optional[int] = None,
     seed: int = 42,
+    export_format: Literal["none", "cryosparc", "relion"] = "none",
+    export_mrcs_name: str = "particles.mrcs",
 ) -> dict:
     """
-    生成模拟训练数据。
+    从 3D volume 生成配对模拟训练数据并保存到 output_dir。
 
     参数:
-        map_path: 3D volume .map 文件路径
-        nside: HEALPix nside, 方向数为 12 * nside^2
-        output_dir: 输出目录
-        image_size: 图像尺寸 D
-        pixel_size: 像素大小 (Å/pixel)
-        num_mics_per_proj: 每个 proj 生成几个不同噪声版本的 mic
-        snr_range: SNR 采样范围 (min, max)
-        defocus_range: 欠焦值采样范围 (μm)
-        max_shift_pixels: 最大随机平移 (pixels)
-        cs: 球差系数 (mm)
-        voltage: 加速电压 (kV)
-        amplitude_contrast: 振幅对比度
-        device: 计算设备
-        chunk_size: 每次投影的方向数
-        seed: 随机种子
+        map_path: 3D volume (.map/.mrc) 路径。
+        nside: HEALPix nside; 方向数 = 12*nside^2 (uniform 模式同) * n_inplane。
+        output_dir: 输出目录。
+        orientation_mode: "healpix" (均匀格点) 或 "uniform" (均匀随机)。
+        n_inplane: 每个 HEALPix 方向的面内角数量。
+        image_size: 输出图像边长 D (volume 超出时裁中心)。
+        pixel_size: 像素大小 (Å/pixel)。
+        num_mics_per_proj: 每投影生成几个 mic (不同噪声/CTF)。
+        snr_range: mic 的 SNR 范围。
+        defocus_range: 散焦范围 (μm)。
+        max_shift_pixels: 最大随机平移 (像素)。
+        cs, voltage, amplitude_contrast: CTF 参数。
+        device: "cuda" 或 "cpu"。
+        chunk_size: batch 分块大小; None = 按显存自动选。
+        seed: 随机种子。
+        export_format: 额外导出格式 ("none" / "cryosparc" / "relion")。
+        export_mrcs_name: 导出 .mrcs 文件名。
 
     返回:
-        dict: 包含生成统计信息的字典
+        metadata dict。
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    rng = np.random.RandomState(seed)
+    rng = np.random.default_rng(seed)
+    dev = torch.device(device)
 
-    # 1. 读取 volume
-    import mrcfile
+    # --- 1. 读取 volume ---
     with mrcfile.open(map_path, permissive=True) as mrc:
-        volume_np = np.asarray(mrc.data, dtype=np.float32).copy()
-    volume = torch.from_numpy(volume_np)
+        vol = torch.from_numpy(np.asarray(mrc.data, dtype=np.float32).copy()).to(dev)
+    D_vol = vol.shape[0]
 
-    num_directions = 12 * nside * nside
-    print(f"Generating {num_directions} HEALPix directions (nside={nside})...")
+    # --- 2. 采样朝向 -> 轴角 [N, 3] ---
+    if orientation_mode == "healpix":
+        aa = healpix_axis_angles(nside, n_inplane=n_inplane, device=dev)
+    else:
+        g = torch.Generator(); g.manual_seed(seed)
+        aa = uniform_so3_axis_angles(12 * nside * nside, generator=g, device=dev)
+    N = aa.shape[0]
+    print(f"Orientations: {N} ({orientation_mode}, nside={nside})")
 
-    # 2. 生成 clean projs（不含 shift、CTF、噪声）
-    #    healpix_project 返回的 projs 在 CPU 上, axisang 也在 CPU 上
-    projs, axisang = healpix_project(
-        volume=volume,
-        nside=nside,
-        device=device,
-        chunk_size=chunk_size,
-    )  # projs: [N, D_vol, D_vol], axisang: [N, 3]
-
-    D_vol = projs.shape[1]
-    print(f"Projections shape: {projs.shape}, dtype: {projs.dtype}")
-
-    # 3. 如果 volume 尺寸 != image_size，裁剪中心区域
+    # --- 3. 干净投影 [N, D, D] (无 CTF / 无噪声, CLAUDE.md 约定) ---
+    print(f"Projecting {N} orientations on {device} ...")
+    with torch.no_grad():
+        projs = project_fourier_slice_from_axis_angle(
+            vol, aa, pfac=2, normalize=True, noise_model="none", chunk_size=chunk_size,
+        )  # [N, D_vol, D_vol]
+    m = (D_vol - image_size) // 2 if D_vol != image_size else 0
     if D_vol != image_size:
-        margin = (D_vol - image_size) // 2
-        projs = projs[:, margin:margin + image_size, margin:margin + image_size]
-        print(f"Cropped projections to {image_size}x{image_size}")
+        projs = projs[:, m : m + image_size, m : m + image_size]
+    projs = projs.cpu()
+    print(f"Projections: {tuple(projs.shape)}")
 
-    total_mics = num_directions * num_mics_per_proj
-
-    # 4. 为每个 mic 随机采样 SNR, defocus, shift
-    #    shift_values 单位是 pixels
-    snr_values = rng.uniform(snr_range[0], snr_range[1], size=total_mics)
-    snr_values = snr_values.reshape(num_directions, num_mics_per_proj)
-
-    defocus_values = rng.uniform(defocus_range[0], defocus_range[1], size=total_mics)
-    defocus_values = defocus_values.reshape(num_directions, num_mics_per_proj)
-
-    # shift_values: [num_directions, num_mics_per_proj, 2], 单位 pixels
-    shift_values = rng.uniform(-max_shift_pixels, max_shift_pixels, size=(total_mics, 2))
-    shift_values = shift_values.reshape(num_directions, num_mics_per_proj, 2)
-
-    mics_list = []
-    pairs_list = []  # (proj_idx, mic_global_idx)
-
-    print(f"Generating {total_mics} noisy micrographs...")
-    mic_idx = 0
-    for i in tqdm(range(num_directions)):
-        proj_i = projs[i]  # [D, D], CPU
-
+    # --- 4. Mics (CTF + shift + noise 逐颗粒) ---
+    M = N * num_mics_per_proj
+    snr_all  = rng.uniform(*snr_range,          size=(N, num_mics_per_proj))
+    df_all   = rng.uniform(*defocus_range,       size=(N, num_mics_per_proj))  # μm
+    shft_all = rng.uniform(-max_shift_pixels, max_shift_pixels,
+                           size=(N, num_mics_per_proj, 2))
+    mics_list: list[Tensor] = []
+    pairs_list: list[tuple[int, int]] = []
+    mic_id = 0
+    for i in tqdm(range(N), desc="Mics"):
         for j in range(num_mics_per_proj):
-            # 获取当前 mic 的参数
-            snr = float(snr_values[i, j])
-            defocus = float(defocus_values[i, j])
-            # shift 已经是 pixels 单位，不需要再除以 pixel_size
-            shift = torch.from_numpy(shift_values[i, j]).float().unsqueeze(0)  # [1, 2]
+            snr = float(snr_all[i, j])
+            df_A = float(df_all[i, j]) * 1e4  # μm -> Å
+            sx, sy = float(shft_all[i, j, 0]), float(shft_all[i, j, 1])
+            shift_t = torch.tensor([[sx, sy]], device=dev)
+            with torch.no_grad():
+                mic = project_fourier_slice_from_axis_angle(
+                    vol, aa[i : i + 1], shifts=shift_t, pfac=2,
+                    normalize=True, noise_model="none",
+                    apply_ctf=True, psize=pixel_size,
+                    ctf_voltage=voltage, ctf_cs=cs,
+                    ctf_amp_contrast=amplitude_contrast,
+                    ctf_df_u=df_A, ctf_df_v=df_A, ctf_particle_sign=-1.0,
+                )[0]  # [D_vol, D_vol]
+            if D_vol != image_size:
+                mic = mic[m : m + image_size, m : m + image_size]
+            # 加噪声
+            x0 = mic - mic.mean()
+            sigma_n = torch.sqrt((x0 ** 2).mean() / (snr + 1e-8)).clamp(min=1e-8)
+            g_t = torch.Generator(device=dev); g_t.manual_seed(seed + mic_id)
+            mic = mic + torch.randn(mic.shape, generator=g_t, device=dev) * sigma_n
+            mics_list.append(mic.cpu())
+            pairs_list.append((i, mic_id))
+            mic_id += 1
 
-            # 生成 CTF（频域，DC 在 corner）
-            ctf = compute_ctf(
-                image_size=image_size,
-                pixel_size=pixel_size,
-                defocus=defocus,
-                cs=cs,
-                voltage=voltage,
-                amplitude_contrast=amplitude_contrast,
-                device=device,
-            )  # [D, D] complex, DC 在 corner
+    mics   = torch.stack(mics_list)                       # [M, D, D]
+    pairs  = torch.tensor(pairs_list, dtype=torch.long)   # [M, 2]
+    axisang = aa.cpu()                                    # [N, 3]
 
-            # 将 proj 移至 GPU: [D, D] -> [1, D, D]
-            mic_proj = proj_i.unsqueeze(0).to(device)  # [1, D, D]
-
-            # ---- 正向 FFT: 实空间 -> 频域，DC 居中 ----
-            # 与 project.py 保持一致: fftshift -> fft2 -> fftshift
-            #   1. fftshift: 实空间 DC 由 center → corner
-            #   2. fft2(..., norm='ortho'): FFT
-            #   3. fftshift: 频域 DC 由 corner → center
-            mic_ft = fftshift(
-                fft2(fftshift(mic_proj, dim=(-2, -1)), dim=(-2, -1), norm="ortho"),
-                dim=(-2, -1),
-            )  # [1, D, D] complex, DC 居中
-
-            # ---- 应用 shift（频域相位调制）----
-            # shift 单位 pixels, fftfreq 单位 cycles/pixel
-            D = image_size
-            dx = shift[:, 0].view(1, 1, 1).to(device)  # [1, 1, 1]
-            dy = shift[:, 1].view(1, 1, 1).to(device)  # [1, 1, 1]
-            shift_freq = fftfreq(D, device=device)  # [D], [-0.5, 0.5)
-            shift_freq = fftshift(shift_freq)  # 居中，与频域数据 DC 居中一致
-            shift_fy, shift_fx = torch.meshgrid(shift_freq, shift_freq, indexing="ij")
-            # phase = exp(-2πi * (fx * dx + fy * dy))
-            shift_angle = -2.0 * math.pi * (
-                shift_fx[None, :, :] * dx + shift_fy[None, :, :] * dy
-            )  # [1, D, D]
-            shift_phase = torch.polar(torch.ones_like(shift_angle), shift_angle)
-            mic_ft = mic_ft * shift_phase
-
-            # ---- 应用 CTF ----
-            # compute_ctf 返回的 CTF 的 DC 在 corner，需要 fftshift 到 center
-            if ctf.dim() == 2:
-                ctf = ctf.unsqueeze(0)  # [1, D, D]
-            ctf_centered = fftshift(ctf, dim=(-2, -1))  # DC corner → center
-            mic_ft = mic_ft * ctf_centered.to(device)
-
-            # ---- 逆 FFT: 频域 -> 实空间 ----
-            # 与 project.py 保持一致: fftshift -> ifft2 -> fftshift -> .real -> * sqrt(D)
-            #   1. fftshift: 频域 DC 由 center → corner
-            #   2. ifft2(..., norm='ortho'): IFFT
-            #   3. fftshift: 实空间 DC 由 corner → center
-            #   4. .real: 取实部
-            #   5. * sqrt(D): 补偿 ortho 归一化的 1/sqrt(D) 因子
-            mic = ifft2(
-                fftshift(mic_ft, dim=(-2, -1)), dim=(-2, -1), norm="ortho"
-            )
-            mic = fftshift(mic, dim=(-2, -1)).real * math.sqrt(D)  # [1, D, D]
-
-            # ---- 加噪声 ----
-            # SNR = var_signal / var_noise
-            x0 = mic - mic.mean(dim=(-2, -1), keepdim=True)  # [1, D, D]
-            var_s = (x0 ** 2).mean(dim=(-2, -1))  # [1,]
-            var_n = var_s / (snr + 1e-8)  # [1,]
-            sigma_n = torch.sqrt(torch.clamp(var_n, min=1e-8))  # [1,]
-            g = torch.Generator(device=device)
-            g.manual_seed(seed + mic_idx)
-            noise = torch.randn(
-                mic.shape, generator=g, device=device, dtype=mic.dtype
-            ) * sigma_n.view(-1, 1, 1)  # [1, D, D]
-            mic = mic + noise
-
-            mics_list.append(mic.squeeze(0).cpu())  # [D, D]
-            pairs_list.append((i, mic_idx))
-            mic_idx += 1
-
-    # 5. 保存
-    mics = torch.stack(mics_list, dim=0)  # [M, D, D]
-    pairs = torch.tensor(pairs_list, dtype=torch.long)  # [M, 2]
-
-    torch.save(projs.cpu(), output_dir / "projs.pt")
-    torch.save(mics, output_dir / "mics.pt")
-    torch.save(axisang.cpu(), output_dir / "axisang.pt")
-    torch.save(pairs, output_dir / "pairs.pt")
-
-    # 保存元数据
-    metadata = {
-        "map_path": str(map_path),
-        "nside": nside,
-        "num_directions": num_directions,
-        "num_mics_total": total_mics,
-        "num_mics_per_proj": num_mics_per_proj,
-        "image_size": image_size,
-        "pixel_size": pixel_size,
-        "snr_range": list(snr_range),
-        "defocus_range": list(defocus_range),
-        "max_shift_pixels": max_shift_pixels,
-        "cs": cs,
-        "voltage": voltage,
-        "amplitude_contrast": amplitude_contrast,
-        "seed": seed,
-    }
+    # --- 5. 保存训练张量 ---
+    torch.save(projs,   output_dir / "projs.pt")
+    torch.save(mics,    output_dir / "mics.pt")
+    torch.save(axisang, output_dir / "axisang.pt")
+    torch.save(pairs,   output_dir / "pairs.pt")
+    meta = dict(
+        map_path=str(map_path), nside=nside, orientation_mode=orientation_mode,
+        n_inplane=n_inplane, num_directions=N, num_mics_total=M,
+        num_mics_per_proj=num_mics_per_proj, image_size=image_size,
+        pixel_size=pixel_size, snr_range=list(snr_range),
+        defocus_range=list(defocus_range), max_shift_pixels=max_shift_pixels,
+        cs=cs, voltage=voltage, amplitude_contrast=amplitude_contrast, seed=seed,
+    )
     with open(output_dir / "metadata.yaml", "w") as f:
-        yaml.dump(metadata, f)
+        yaml.dump(meta, f)
+    print(f"Saved {N} projs, {M} mics to {output_dir}")
 
-    print(f"Saved {num_directions} projs, {total_mics} mics to {output_dir}")
-    print(f"Proj shape: {projs.shape}, Mic shape: {mics.shape}")
-    return metadata
+    # --- 6. 可选格式导出 ---
+    if export_format != "none":
+        from siamese.data.export import write_cryosparc_cs, write_relion_star
+        mrcs_path = output_dir / export_mrcs_name
+        with mrcfile.new(str(mrcs_path), overwrite=True) as mrc:
+            mrc.set_data(projs.numpy().astype(np.float32))
+            mrc.voxel_size = pixel_size
+        aa_np = axisang.numpy()
+        if export_format == "cryosparc":
+            write_cryosparc_cs(aa_np, output_dir / "particles.cs", mrcs_path, pixel_size)
+        else:
+            write_relion_star(aa_np, output_dir / "particles.star", mrcs_path, pixel_size)
+
+    return meta

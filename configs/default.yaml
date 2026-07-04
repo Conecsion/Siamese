@@ -1,5 +1,5 @@
 # Siamese Cryo-EM 默认训练配置
-# 冒烟测试用: 128x128 图像, ConvNeXt-Tiny, batch_size=64
+# 128x128 图像, ConvNeXt-Tiny, batch_size=64
 
 # --- 数据 ---
 data_dir: "data"
@@ -7,7 +7,7 @@ image_size: 128
 train_split: 0.7
 val_split: 0.15
 
-# --- 模型 ---
+# --- Proj 编码器 ---
 backbone: "convnext_tiny"
 embedding_dim: 128
 real_in_channels: 1
@@ -15,12 +15,20 @@ freq_in_channels: 2
 convnext_depths: [3, 3, 9, 3]
 convnext_dims: [96, 192, 384, 768]
 
+# --- Mic 编码器 (空 = 与 proj 相同) ---
+# 可配置更大的 backbone 增强对噪声的表征能力，例如:
+#   mic_backbone: "convnext_small"
+mic_backbone: ""
+mic_convnext_depths: []
+mic_convnext_dims: []
+
 # --- 训练 ---
 batch_size: 64
 num_epochs: 200
 learning_rate: 0.0001
 weight_decay: 0.0001
 temperature: 0.07
+orientation_margin_deg: 15.0   # 近邻投影不计入 negative; 0 = 标准 InfoNCE
 
 # scheduler
 scheduler_t0: 50

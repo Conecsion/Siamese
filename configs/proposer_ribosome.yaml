@@ -1,0 +1,45 @@
+# Proposer 训练配置 — ribosome 单蛋白可行性验证 (design §7.1 Phase A)
+# 数据: cs_processed/ribosome_homerefine (C1, 4.16Å, 6483 颗粒)
+
+# --- 数据 ---
+cs_path: "data/cs_processed/ribosome_homerefine/J31_particles/J31_particles_exported.cs"
+reference_path: "data/cs_processed/ribosome_homerefine/J31_volume/J31/J31_004_volume_map.mrc"
+project_dir: "data/cs_processed/ribosome_homerefine/J31_particles"
+
+# --- 重采样 / 分桶 ---
+working_ps: 2.0          # proposer 工作 ps (Nyquist 4Å); 最终重建用原生不受限
+bucket: 256              # ribosome 视场 402Å → box ~201 → 桶 256
+
+# gallery 不能带 per-particle CTF (跨颗粒共享), 故 proj 也必须 CTF-free 保持同域;
+# mic 塔负责同时跨越 噪声 + CTF gap。(带 CTF 的同域方案需 defocus 分箱, design §8.2)
+apply_ctf_to_proj: false
+
+# --- 模型 ---
+backbone: "convnext_tiny"
+image_size: 256          # = bucket
+embedding_dim: 128
+temperature: 0.07
+orientation_margin_deg: 7.0   # 方向感知 loss; ≈ gallery 网格分辨率
+
+# --- gallery (评估用) ---
+# nside=8 (视角~7.3°) × inplane=12 (30°间隔); 容差需 >= 网格分辨率否则 Recall 恒 0
+gallery_nside: 8         # 12*8²=768 视角
+gallery_inplane: 12      # 共 9216 朝向, in-plane 30°
+grid_tol_deg: 15.0       # >= 网格分辨率 (in-plane 30°/2 + 视角 7°)
+
+# --- 训练 ---
+batch_size: 16
+num_epochs: 40
+lr: 0.0001
+weight_decay: 0.0001
+eval_interval: 5
+mixed_precision: true
+# 损失: gallery 分类 (训练目标=检索目标) + InfoNCE (维持联合空间)
+w_gallery_ce: 1.0
+w_infonce: 0.5
+label_sigma_deg: 7.0     # 软标签高斯宽度
+
+# --- 系统 ---
+device: "cuda"
+seed: 42
+checkpoint_dir: "checkpoints_proposer"

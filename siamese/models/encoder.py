@@ -1,8 +1,14 @@
 """
-Siamese 双分支编码器。
+编码器模块。
 
-实空间分支 (1 通道) + 频域分支 (2 通道: 实部+虚部)
-→ 各自经过 backbone 提取特征 → GAP → FusionHead → L2 embedding
+SiameseEncoder: 双分支编码器 (实空间 + 频域)
+    实空间分支 (1 通道) + 频域分支 (2 通道: 实部+虚部)
+    → 各自经过 backbone 提取特征 → GAP → FusionHead → L2 embedding
+
+TwoTowerEncoder: 非对称双塔编码器
+    ProjEncoder (处理干净投影) + MicEncoder (处理含噪颗粒)
+    两塔独立权重, 输出同维度 embedding 用于对比学习。
+    推理时 proj gallery 可离线预计算。
 
 优化:
     - stem_stride 可配置, 默认 4 (ConvNeXt 标准), 小图像建议 2
@@ -10,13 +16,18 @@ Siamese 双分支编码器。
     - 支持 cross-attention 或 concat 融合
 """
 
-from typing import Literal, Tuple
+from typing import Literal, Protocol, Tuple, cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from siamese.models.backbone import build_backbone
+
+
+class _Backbone(Protocol):
+    """timm backbone 最小接口，供 Pyright 类型推断。"""
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor: ...
 from siamese.models.fusion import FusionHead
 from siamese.utils.fft import image_to_freq_channels, normalize_image
 
@@ -105,28 +116,28 @@ class SiameseEncoder(nn.Module):
         self.share_backbone = share_backbone
 
         # 实空间分支 backbone
-        self.backbone_real = build_backbone(
+        self.backbone_real: _Backbone = cast(_Backbone, build_backbone(
             name=backbone_name,
             in_channels=real_in_channels,
             image_size=image_size,
             depths=convnext_depths,
             dims=convnext_dims,
             stem_stride=stem_stride,
-        )
+        ))
 
         if share_backbone:
             # 频域分支共享 backbone, 仅用轻量 stem adapter 处理 2->1 通道
-            self.backbone_freq = self.backbone_real
+            self.backbone_freq: _Backbone = self.backbone_real
             self.freq_adapter = nn.Conv2d(freq_in_channels, real_in_channels, kernel_size=1)
         else:
-            self.backbone_freq = build_backbone(
+            self.backbone_freq = cast(_Backbone, build_backbone(
                 name=backbone_name,
                 in_channels=freq_in_channels,
                 image_size=image_size,
                 depths=convnext_depths,
                 dims=convnext_dims,
                 stem_stride=stem_stride,
-            )
+            ))
             self.freq_adapter = None
 
         # 特征维度 (ConvNeXt 最后一个 stage 的输出通道数)
@@ -183,3 +194,59 @@ class SiameseEncoder(nn.Module):
         embedding = self.fusion_head(real_feat, freq_feat)  # [N, embedding_dim]
 
         return embedding
+
+
+class TwoTowerEncoder(nn.Module):
+    """
+    非对称双塔编码器: 独立的 proj_encoder + mic_encoder。
+
+    两塔拥有独立权重, proj 编码器处理干净投影, mic 编码器处理含噪颗粒。
+    输出同维度 L2 归一化 embedding, 配合 InfoNCE 对比损失训练。
+
+    推理时可离线预计算整个 proj gallery 的 embedding, 只需在线跑 mic_encoder。
+    """
+
+    def __init__(self, proj_encoder: SiameseEncoder, mic_encoder: SiameseEncoder):
+        """
+        参数:
+            proj_encoder: 处理干净投影的编码器 (通常轻量)
+            mic_encoder:  处理含噪颗粒的编码器 (可更重/更宽)
+        """
+        super().__init__()
+        assert proj_encoder.embedding_dim == mic_encoder.embedding_dim, (
+            f"两塔 embedding_dim 必须相同: "
+            f"proj={proj_encoder.embedding_dim}, mic={mic_encoder.embedding_dim}"
+        )
+        self.proj_encoder = proj_encoder
+        self.mic_encoder = mic_encoder
+        self.embedding_dim = proj_encoder.embedding_dim
+
+    def encode_proj(self, proj: torch.Tensor) -> torch.Tensor:
+        """
+        参数:
+            proj: 形状 [N, 1, D, D] 的干净投影
+        返回:
+            embedding: 形状 [N, embedding_dim]
+        """
+        return self.proj_encoder(proj)
+
+    def encode_mic(self, mic: torch.Tensor) -> torch.Tensor:
+        """
+        参数:
+            mic: 形状 [N, 1, D, D] 的含噪颗粒
+        返回:
+            embedding: 形状 [N, embedding_dim]
+        """
+        return self.mic_encoder(mic)
+
+    def forward(
+        self, mic: torch.Tensor, proj: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        参数:
+            mic:  形状 [N, 1, D, D]
+            proj: 形状 [N, 1, D, D]
+        返回:
+            (z_mic, z_proj): 各形状 [N, embedding_dim]
+        """
+        return self.encode_mic(mic), self.encode_proj(proj)
