@@ -17,6 +17,13 @@ import random
 import warnings
 from pathlib import Path
 
+# 设置多进程启动方法（必须在导入 torch 之前）
+import multiprocessing
+try:
+    multiprocessing.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass  # 已经设置过了
+
 import deepspeed
 import matplotlib.pyplot as plt
 import numpy as np
