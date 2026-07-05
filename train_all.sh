@@ -84,7 +84,8 @@ echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━
 echo ""
 
 # 启动训练并实时显示日志
-deepspeed --num_gpus=4 \
+# 注意：GPU 0 被显示服务器占用，只使用 GPU 1-3
+CUDA_VISIBLE_DEVICES=1,2,3 deepspeed --num_gpus=3 \
     scripts/train_proposer_ds.py \
     --config configs/proposer_ribosome_multi.yaml \
     --deepspeed_config configs/ds_config.json \
