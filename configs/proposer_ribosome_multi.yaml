@@ -30,7 +30,8 @@ temperature: 0.07        # 降低以提高数值稳定性（避免 NaN）
 # --- 训练 ---
 batch_size: 16
 num_epochs: 80           # 数据量 7× → 训练更久
-lr: 0.0002               # 提升 (之前 1e-4 偏保守)
+lr: 0.0001               # 降低学习率防止 NaN (从 0.0002 降到 0.0001)
+warmup_steps: 1000       # 增加学习率预热步数
 weight_decay: 0.0002     # 加强正则 (打过拟合)
 eval_interval: 5
 mixed_precision: true

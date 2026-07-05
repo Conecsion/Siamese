@@ -8,7 +8,7 @@
   "optimizer": {
     "type": "AdamW",
     "params": {
-      "lr": 0.0002,
+      "lr": 0.0001,
       "betas": [0.9, 0.999],
       "eps": 1e-8,
       "weight_decay": 0.0002
@@ -19,8 +19,8 @@
     "type": "WarmupDecayLR",
     "params": {
       "warmup_min_lr": 0,
-      "warmup_max_lr": 0.0002,
-      "warmup_num_steps": 500,
+      "warmup_max_lr": 0.0001,
+      "warmup_num_steps": 1000,
       "total_num_steps": 60000
     }
   },
@@ -29,7 +29,7 @@
     "enabled": true,
     "loss_scale": 0,
     "loss_scale_window": 1000,
-    "initial_scale_power": 16,
+    "initial_scale_power": 12,
     "hysteresis": 2,
     "min_loss_scale": 1
   },
